@@ -1,0 +1,40 @@
+# Imagen de producción de SINAGUA (un solo contenedor: Apache + PHP 8.3).
+# No lleva secretos: todo se configura con variables de entorno (ver .env.production.example).
+FROM composer:2 AS vendor
+WORKDIR /app
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-interaction --prefer-dist --optimize-autoloader --ignore-platform-reqs
+
+FROM php:8.3-apache
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev libzip-dev libicu-dev curl \
+    && docker-php-ext-install pdo_pgsql zip intl bcmath opcache \
+    && a2enmod rewrite headers \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV APACHE_DOCUMENT_ROOT=/var/www/html/public \
+    PORT=8080 \
+    APP_ENV=production \
+    APP_DEBUG=false \
+    LOG_CHANNEL=stderr \
+    RUN_MIGRATIONS=true
+RUN sed -ri 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
+    && sed -ri 's!AllowOverride None!AllowOverride All!g' /etc/apache2/apache2.conf \
+    && echo 'ServerName localhost' >> /etc/apache2/apache2.conf
+COPY docker/prod/php.ini /usr/local/etc/php/conf.d/sinagua.ini
+
+WORKDIR /var/www/html
+COPY . .
+COPY --from=vendor /app/vendor ./vendor
+RUN rm -f .env && CACHE_STORE=array php artisan package:discover --ansi \
+    && chown -R www-data:www-data storage bootstrap/cache
+
+COPY docker/prod/entrypoint.sh /usr/local/bin/sinagua-entrypoint
+RUN chmod +x /usr/local/bin/sinagua-entrypoint
+
+# La plataforma revisa que el servidor y la base respondan.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s CMD curl -fsS "http://localhost:${PORT}/api/v1/health" || exit 1
+
+EXPOSE 8080
+ENTRYPOINT ["sinagua-entrypoint"]
+CMD ["apache2-foreground"]

@@ -1,0 +1,2415 @@
+openapi: 3.1.0
+info:
+  title: SINAGUA API
+  version: 1.0.0
+  summary: Gestión del pozo de agua comunitario (padrón, cuotas, cobranza, gastos y bitácora).
+  description: |
+    API REST del sistema **SINAGUA**. La usan la app de escritorio (que trabaja sin internet y
+    sincroniza con `/sync`) y los clientes en línea (web y móvil).
+
+    ## Autenticación (JWT)
+    1. `POST /auth/login` con correo y contraseña devuelve un **JWT firmado con HS256**.
+    2. Cada petición protegida envía `Authorization: Bearer <token>`.
+    3. El token vence a las **12 horas** (`exp`) o tras **30 minutos sin usarse**; `POST /auth/refresh`
+       lo cambia por uno nuevo y `POST /auth/logout` lo revoca al instante.
+
+    Claims del token: `iss`, `aud` (`sinagua-api`), `sub` (id del usuario), `jti` (id de la sesión en
+    el servidor), `iat`, `nbf`, `exp`, `cid` (comunidad), `did` (equipo) y `roles`. Los roles del token
+    son informativos: **los permisos siempre se revisan en el servidor** en cada petición.
+
+    Las contraseñas se guardan con **bcrypt** (costo 12) y se re-cifran solas si se guardaron con un
+    costo menor. Tras 5 intentos fallidos la cuenta se bloquea 15 minutos (`423`).
+
+    ## Formato de respuestas
+    - Éxito: `{ "data": ... }` (las listas paginadas agregan `meta`; algunas operaciones agregan `notices`).
+    - Error: `{ "error": { "code": "...", "message": "...", "details": { ... } } }`. El `message` está en
+      español sencillo para mostrarse tal cual al usuario.
+
+    ## Dinero
+    Todos los montos van en **centavos** (enteros) para evitar errores de redondeo: `15000` = $150.00.
+
+    ## Comunidades
+    Cada usuario pertenece a una comunidad y solo ve los datos de ella (filtro en la aplicación y
+    Row-Level Security en PostgreSQL). El superadministrador no pertenece a ninguna y solo da de alta comunidades.
+
+    ## Concurrencia
+    Los cobros, entregas y asignaciones se registran en transacciones con `SELECT … FOR UPDATE` y
+    candados consultivos de PostgreSQL: si dos equipos cobran el mismo mes a la vez, uno recibe `201` y
+    el otro `409 already_paid`; nunca hay cobros dobles ni folios repetidos.
+  contact:
+    name: Equipo SINAGUA (ITSES)
+  license:
+    name: Uso académico
+servers:
+  - url: http://localhost:8081/api/v1
+    description: Desarrollo (Docker)
+  - url: 'http://{servidor}:{puerto}/api/v1'
+    description: Servidor de la comunidad en la red local
+    variables:
+      servidor:
+        default: 192.168.1.10
+      puerto:
+        default: '8081'
+security:
+  - bearerAuth: []
+tags:
+  - name: Sistema
+    description: Estado del servicio.
+  - name: Autenticación
+    description: Inicio de sesión con JWT, renovación y cierre.
+  - name: Equipos y sincronización
+    description: Registro de equipos de escritorio y sincronización sin conexión (outbox).
+  - name: Bitácora
+    description: Registro inmutable con cadena de huellas SHA-256.
+  - name: Movimientos
+    description: Anulación (nunca se borran ni editan movimientos de dinero).
+  - name: Padrón
+    description: Viviendas, familias y habitantes.
+  - name: Ajustes
+    description: Cómo cobra la comunidad (cuota, días de pago, multas, paquetes).
+  - name: Cuotas y multas
+    description: Cuota por mes, generación de cargos y multas.
+  - name: Cobradores
+    description: Asignación de viviendas a cobradores.
+  - name: Cobranza
+    description: Búsqueda, estado de cuenta y pagos con folio.
+  - name: Ingresos y gastos
+    description: Fondos, ingresos extras y gastos con comprobante.
+  - name: Entregas y cortes
+    description: Dinero que cada cobrador entrega a tesorería.
+  - name: Usuarios
+    description: Usuarios y roles de la comunidad.
+  - name: Superadministrador
+    description: Alta de comunidades.
+
+paths:
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Estado del servicio
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: Servicio y base de datos en línea.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Health'
+              example:
+                data: { status: ok, app: SINAGUA, api_version: v1, time: '2026-11-08T10:00:00-06:00', checks: { database: ok } }
+        '503':
+          description: La base de datos no responde (`status` = `degraded`).
+
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión y obtener un JWT
+      description: |
+        Correo inexistente y contraseña incorrecta responden igual (`401 invalid_credentials`) para no revelar
+        qué correos existen. Tras 5 fallos la cuenta se bloquea 15 minutos. Además hay un límite de 30
+        intentos por minuto por IP (`429`).
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example: { email: admin@sanisidro.test, password: prueba12345 }
+      responses:
+        '200':
+          description: Sesión iniciada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Correo o contraseña incorrectos.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: invalid_credentials, message: Correo o contraseña incorrectos. } }
+        '403':
+          description: |
+            Cuenta, comunidad o equipo desactivados (`account_inactive`, `community_inactive`, `device_inactive`),
+            cuenta pendiente de activar (`account_pending`) o falta el código del correo (`two_factor_required`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423':
+          description: Cuenta bloqueada por intentos fallidos.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: account_locked, message: Demasiados intentos fallidos. Intente de nuevo en 15 min., details: { retry_after_seconds: 900 } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/me:
+    get:
+      tags: [Autenticación]
+      summary: Usuario de la sesión actual
+      operationId: me
+      responses:
+        '200':
+          description: Datos y rol vigentes del usuario.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/refresh:
+    post:
+      tags: [Autenticación]
+      summary: Renovar el JWT (rotación)
+      description: Entrega un JWT nuevo y revoca el anterior; el token viejo deja de servir de inmediato.
+      operationId: refresh
+      responses:
+        '200':
+          description: Token nuevo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Autenticación]
+      summary: Cerrar sesión
+      description: Revoca la sesión del JWT enviado. Queda registrado en la bitácora.
+      operationId: logout
+      responses:
+        '200':
+          description: Sesión cerrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      logged_out: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /devices:
+    post:
+      tags: [Equipos y sincronización]
+      summary: Registrar un equipo de escritorio
+      description: Idempotente por `id`. Asigna al equipo su prefijo de folio (E01, E02, …).
+      operationId: registerDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name]
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string, maxLength: 120, example: Caja de la tesorería }
+      responses:
+        '200':
+          description: El equipo ya estaba registrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Device' } }
+        '201':
+          description: Equipo registrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Device' } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /sync/push:
+    post:
+      tags: [Equipos y sincronización]
+      summary: Subir los cambios hechos sin conexión
+      description: |
+        Recibe la cola de salida (outbox) del equipo, hasta 500 mutaciones. Cada mutación es idempotente por
+        `mutation_id`: si el equipo reintenta por un corte de red, no se aplica dos veces.
+      operationId: syncPush
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, mutations]
+              properties:
+                device_id: { type: string, format: uuid }
+                mutations:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: '#/components/schemas/Mutation' }
+      responses:
+        '200':
+          description: Resultado por mutación.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      results:
+                        type: array
+                        items: { $ref: '#/components/schemas/MutationResult' }
+                      server_time: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /sync/pull:
+    get:
+      tags: [Equipos y sincronización]
+      summary: Bajar los cambios de la comunidad
+      operationId: syncPull
+      parameters:
+        - { name: device_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: cursor, in: query, schema: { type: integer, minimum: 0 }, description: Último cursor recibido. }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 500 } }
+      responses:
+        '200':
+          description: Cambios posteriores al cursor.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      changes:
+                        type: array
+                        items: { $ref: '#/components/schemas/Change' }
+                      next_cursor: { type: integer }
+                      has_more: { type: boolean }
+                      scope: { type: string }
+                      server_time: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /audit-logs:
+    get:
+      tags: [Bitácora]
+      summary: Consultar la bitácora
+      description: Requiere el permiso `bitacora.consultar`. 20 registros por página.
+      operationId: listAuditLogs
+      parameters:
+        - { name: user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: entity, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de registros.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditLog' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /audit-logs/verify:
+    get:
+      tags: [Bitácora]
+      summary: Verificar la cadena de huellas (en la petición)
+      operationId: verifyAuditLogs
+      responses:
+        '200':
+          description: Resultado de la verificación.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/ChainResult' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /audit-logs/verify-async:
+    post:
+      tags: [Bitácora]
+      summary: Pedir la verificación en segundo plano (cola)
+      description: |
+        Responde `202` al instante y un worker de la cola (`php artisan queue:work`) recorre la bitácora por bloques.
+        Pedirla varias veces seguidas deja **un solo trabajo** por comunidad (`ShouldBeUnique`) y dos workers
+        nunca verifican la misma comunidad a la vez (`WithoutOverlapping`).
+      operationId: verifyAuditLogsAsync
+      responses:
+        '202':
+          description: Trabajo en cola.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties: { status: { type: string, const: queued } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [Bitácora]
+      summary: Resultado de la última verificación en segundo plano
+      operationId: verifyAuditLogsStatus
+      responses:
+        '200':
+          description: '`none` (nunca se pidió), `queued` (en cola) o `done` (con el resultado).'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - type: object
+                        properties:
+                          status: { type: string, enum: [none, queued, done] }
+                          queued_at: { type: string, format: date-time }
+                          finished_at: { type: string, format: date-time }
+                      - $ref: '#/components/schemas/ChainResult'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /movements/{entity}/{id}/void:
+    post:
+      tags: [Movimientos]
+      summary: Anular un movimiento con motivo
+      description: Requiere `movimientos.anular`. El movimiento queda anulado, no se borra (cargos, pagos, ingresos, gastos y entregas).
+      operationId: voidMovement
+      parameters:
+        - name: entity
+          in: path
+          required: true
+          schema: { type: string, enum: [cargos, pagos, ingresos, gastos, entregas] }
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, example: Se registró dos veces por error }
+      responses:
+        '200':
+          description: Movimiento anulado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: object, additionalProperties: true } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /padron/registro:
+    post:
+      tags: [Padrón]
+      summary: Registrar familia con su titular (y vivienda si hace falta)
+      description: Si el domicilio ya tiene familias responde `409 address_has_family`; con `confirm_shared_address=true` la registra ahí.
+      operationId: registerFamily
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vivienda_id: { type: string, format: uuid, description: Vivienda existente (o enviar `vivienda`). }
+                vivienda: { $ref: '#/components/schemas/ViviendaInput' }
+                familia:
+                  type: object
+                  properties:
+                    name: { type: string, example: Familia López }
+                    cuota_especial_cents: { type: [integer, 'null'] }
+                titular: { $ref: '#/components/schemas/HabitanteInput' }
+                confirm_shared_address: { type: boolean }
+            example:
+              vivienda: { address: Calle Hidalgo 12, neighborhood: Centro, paquete_id: p1 }
+              familia: { name: Familia López }
+              titular: { given_names: Ana, paternal_surname: López, phone: '7221234567' }
+      responses:
+        '201':
+          description: Registrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      vivienda: { $ref: '#/components/schemas/Vivienda' }
+                      familia: { $ref: '#/components/schemas/Familia' }
+                      titular: { $ref: '#/components/schemas/Habitante' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /padron/{entity}:
+    parameters:
+      - $ref: '#/components/parameters/PadronEntity'
+    get:
+      tags: [Padrón]
+      summary: Buscar en el padrón (20 por página)
+      operationId: listPadron
+      parameters:
+        - { name: search, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: status, in: query, schema: { type: string, enum: [activos, baja, todos], default: activos } }
+        - { name: vivienda_id, in: query, schema: { type: string, format: uuid } }
+        - { name: familia_id, in: query, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de resultados.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          oneOf:
+                            - $ref: '#/components/schemas/Vivienda'
+                            - $ref: '#/components/schemas/Familia'
+                            - $ref: '#/components/schemas/Habitante'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Padrón]
+      summary: Crear vivienda, familia o habitante
+      operationId: createPadron
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/ViviendaInput'
+                - $ref: '#/components/schemas/FamiliaInput'
+                - $ref: '#/components/schemas/HabitanteInput'
+      responses:
+        '201':
+          description: Creado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    oneOf:
+                      - $ref: '#/components/schemas/Vivienda'
+                      - $ref: '#/components/schemas/Familia'
+                      - $ref: '#/components/schemas/Habitante'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /padron/{entity}/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PadronEntity'
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Padrón]
+      summary: Detalle (con familias o habitantes)
+      operationId: showPadron
+      responses:
+        '200':
+          description: Registro.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: object, additionalProperties: true } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Padrón]
+      summary: Editar
+      operationId: updatePadron
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/ViviendaInput'
+                - $ref: '#/components/schemas/FamiliaInput'
+                - $ref: '#/components/schemas/HabitanteInput'
+      responses:
+        '200':
+          description: Actualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: object, additionalProperties: true } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /padron/{entity}/{id}/deactivate:
+    parameters:
+      - $ref: '#/components/parameters/PadronEntity'
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Padrón]
+      summary: Dar de baja (baja lógica en cascada)
+      description: Con adeudo responde `409 has_debt`; con `confirm_debt=true` la hace y el adeudo se conserva.
+      operationId: deactivatePadron
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+                confirm_debt: { type: boolean }
+      responses:
+        '200':
+          description: Dado de baja.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /padron/{entity}/{id}/activate:
+    parameters:
+      - $ref: '#/components/parameters/PadronEntity'
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Padrón]
+      summary: Reactivar
+      operationId: activatePadron
+      responses:
+        '200':
+          description: Reactivado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: object, additionalProperties: true } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /ajustes:
+    get:
+      tags: [Ajustes]
+      summary: Cómo cobra la comunidad
+      operationId: showAjustes
+      responses:
+        '200':
+          description: Ajustes vigentes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Ajustes' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Ajustes]
+      summary: Cambiar los ajustes de cobro (administrador)
+      operationId: updateAjustes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cuota_cents: { type: [integer, 'null'], minimum: 1 }
+                periodicidad_meses: { type: integer }
+                dias_pago: { type: array, items: { type: integer, minimum: 1, maximum: 31 } }
+                cobro_fuera_de_dias: { type: boolean }
+                multa_cents: { type: integer, minimum: 0 }
+                meses_adelanto: { type: integer, minimum: 0, maximum: 12 }
+                paquetes:
+                  type: array
+                  items: { $ref: '#/components/schemas/Paquete' }
+      responses:
+        '200':
+          description: Ajustes guardados.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Ajustes' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /cuotas:
+    get:
+      tags: [Cuotas y multas]
+      summary: Historial de cuotas
+      operationId: listCuotas
+      responses:
+        '200':
+          description: Cuotas, la más reciente primero.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Cuota'
+                        - type: object
+                          properties:
+                            is_current: { type: boolean }
+                            in_use: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Cuotas y multas]
+      summary: Nueva cuota (vigente desde un mes)
+      operationId: createCuota
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CuotaInput' }
+      responses:
+        '201':
+          description: Cuota creada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Cuota' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /cuotas/{id}:
+    patch:
+      tags: [Cuotas y multas]
+      summary: Editar una cuota sin usar
+      operationId: updateCuota
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CuotaInput' }
+      responses:
+        '200':
+          description: Cuota actualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Cuota' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /periodos:
+    get:
+      tags: [Cuotas y multas]
+      summary: Meses generados con totales
+      operationId: listPeriodos
+      parameters: [{ $ref: '#/components/parameters/Page' }]
+      responses:
+        '200':
+          description: Página de periodos.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Periodo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /periodos/generar:
+    post:
+      tags: [Cuotas y multas]
+      summary: Asignar la cuota del mes y generar sus cargos
+      description: Idempotente; responde `201` si creó cargos y `200` si ya estaban.
+      operationId: generatePeriodo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [year, month]
+              properties:
+                year: { type: integer, example: 2026 }
+                month: { type: integer, minimum: 1, maximum: 12, example: 11 }
+                amount_cents: { type: [integer, 'null'], example: 15000 }
+      responses:
+        '200':
+          description: Ya estaban generados.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '201':
+          description: Cargos generados.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /periodos/{id}/cargos:
+    get:
+      tags: [Cuotas y multas]
+      summary: Cargos de un mes
+      operationId: listCargosPeriodo
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - { name: search, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de cargos.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Cargo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /familias/{id}/cargos:
+    get:
+      tags: [Cuotas y multas]
+      summary: Estado de cuenta de una familia
+      operationId: listCargosFamilia
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Cargos por mes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Cargo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /multas:
+    get:
+      tags: [Cuotas y multas]
+      summary: Multas
+      operationId: listMultas
+      parameters: [{ $ref: '#/components/parameters/Page' }]
+      responses:
+        '200':
+          description: Página de multas.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Cargo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Cuotas y multas]
+      summary: Multar a una o varias familias
+      operationId: createMulta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [familia_ids, description, amount_cents, year, month]
+              properties:
+                familia_ids: { type: array, minItems: 1, maxItems: 500, items: { type: string, format: uuid } }
+                description: { type: string, minLength: 3, maxLength: 190, example: No asistió a la faena }
+                amount_cents: { type: integer, minimum: 1, example: 10000 }
+                year: { type: integer }
+                month: { type: integer }
+      responses:
+        '201':
+          description: Multas creadas.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Cargo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /cobradores:
+    get:
+      tags: [Cobradores]
+      summary: Cobradores con su número de viviendas
+      operationId: listCobradores
+      responses:
+        '200':
+          description: Cobradores.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+                        phone: { type: [string, 'null'] }
+                        is_active: { type: boolean }
+                        viviendas: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /asignaciones:
+    get:
+      tags: [Cobradores]
+      summary: Asignaciones vivienda → cobrador
+      operationId: listAsignaciones
+      parameters:
+        - { name: cobrador_id, in: query, schema: { type: string, format: uuid } }
+        - { name: vivienda_id, in: query, schema: { type: string, format: uuid } }
+        - { name: historial, in: query, schema: { type: boolean }, description: Incluir las terminadas. }
+      responses:
+        '200':
+          description: Asignaciones.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Asignacion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Cobradores]
+      summary: Asignar viviendas a un cobrador
+      description: Una vivienda tiene un solo cobrador a la vez (la asignación vigente se toma con `FOR UPDATE`).
+      operationId: createAsignaciones
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cobrador_id, vivienda_ids]
+              properties:
+                cobrador_id: { type: string, format: uuid }
+                vivienda_ids: { type: array, minItems: 1, maxItems: 500, items: { type: string, format: uuid } }
+      responses:
+        '201':
+          description: Asignaciones creadas.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Asignacion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /asignaciones/reasignar:
+    post:
+      tags: [Cobradores]
+      summary: Pasar todas las viviendas de un cobrador a otro
+      operationId: reassignAsignaciones
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_cobrador_id, to_cobrador_id]
+              properties:
+                from_cobrador_id: { type: string, format: uuid }
+                to_cobrador_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Viviendas reasignadas.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /asignaciones/{id}/end:
+    post:
+      tags: [Cobradores]
+      summary: Terminar una asignación
+      operationId: endAsignacion
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Asignación terminada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Asignacion' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /mis-viviendas:
+    get:
+      tags: [Cobradores]
+      summary: Viviendas asignadas al cobrador de la sesión
+      operationId: myViviendas
+      responses:
+        '200':
+          description: Viviendas con sus familias.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Vivienda' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cobranza/buscar:
+    get:
+      tags: [Cobranza]
+      summary: Buscar domicilio y ver lo que debe cada familia
+      description: El administrador ve todas las viviendas; el cobrador solo las asignadas.
+      operationId: searchCobranza
+      parameters:
+        - { name: search, in: query, schema: { type: string, maxLength: 100 } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Viviendas con adeudo por familia.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string, format: uuid }
+                            label: { type: string }
+                            familias:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  id: { type: string, format: uuid }
+                                  name: { type: string }
+                                  owed_cents: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cobranza/familias/{id}:
+    get:
+      tags: [Cobranza]
+      summary: Cuadrícula de cobro de una familia
+      operationId: estadoCobranza
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Cada cuota y multa con su estado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/CargoEstado' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /pagos:
+    get:
+      tags: [Cobranza]
+      summary: Recibos (el cobrador ve solo los suyos)
+      operationId: listPagos
+      parameters:
+        - { name: familia_id, in: query, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de recibos.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Pago' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Cobranza]
+      summary: Cobrar meses o multas (completos) y emitir folio
+      description: |
+        Transacción con `SELECT … FOR UPDATE` sobre los cargos y candado consultivo para el folio. Si dos
+        peticiones cobran el mismo cargo a la vez, una recibe `201` y la otra `409 already_paid`.
+      operationId: createPago
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [familia_id, cargo_ids]
+              properties:
+                familia_id: { type: string, format: uuid }
+                cargo_ids: { type: array, maxItems: 200, items: { type: string, format: uuid } }
+                advance:
+                  type: array
+                  maxItems: 24
+                  description: Meses por adelantado.
+                  items:
+                    type: object
+                    required: [year, month]
+                    properties:
+                      year: { type: integer }
+                      month: { type: integer }
+      responses:
+        '201':
+          description: Pago registrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Pago' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Cargo ya pagado (`already_paid`) o anulado (`cargo_voided`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: already_paid, message: Cuota de noviembre 2026 ya se pagó con el folio W-000001. } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /ingresos/categorias:
+    get:
+      tags: [Ingresos y gastos]
+      summary: Categorías de ingresos con su saldo
+      operationId: listCategorias
+      responses:
+        '200':
+          description: Categorías.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Categoria' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Ingresos y gastos]
+      summary: Crear categoría (fondo)
+      operationId: createCategoria
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: Baños comunitarios }
+                description: { type: [string, 'null'] }
+      responses:
+        '201':
+          description: Categoría creada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Categoria' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /ingresos/categorias/{id}:
+    patch:
+      tags: [Ingresos y gastos]
+      summary: Editar categoría
+      operationId: updateCategoria
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: [string, 'null'] }
+                is_active: { type: boolean }
+      responses:
+        '200':
+          description: Categoría actualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Categoria' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /ingresos:
+    get:
+      tags: [Ingresos y gastos]
+      summary: Ingresos extras
+      operationId: listIngresos
+      parameters:
+        - { name: categoria_id, in: query, schema: { type: string, format: uuid } }
+        - { name: desde, in: query, schema: { type: string, format: date } }
+        - { name: hasta, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: Ingresos, el más reciente primero (máximo 500).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Ingreso' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    post:
+      tags: [Ingresos y gastos]
+      summary: Registrar ingreso
+      operationId: createIngreso
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [categoria_id, amount_cents, received_on]
+              properties:
+                categoria_id: { type: string, format: uuid }
+                amount_cents: { type: integer, minimum: 1, example: 5000 }
+                received_on: { type: string, format: date, example: '2026-11-08' }
+                note: { type: [string, 'null'], maxLength: 255 }
+      responses:
+        '201':
+          description: Ingreso registrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Ingreso' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /fondos:
+    get:
+      tags: [Ingresos y gastos]
+      summary: Fondos con saldo (cuotas del agua y cada categoría)
+      operationId: listFondos
+      responses:
+        '200':
+          description: Fondos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Fondo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /gastos:
+    get:
+      tags: [Ingresos y gastos]
+      summary: Gastos
+      operationId: listGastos
+      parameters:
+        - { name: fondo, in: query, schema: { type: string }, description: '`cuotas` o id de categoría.' }
+        - { name: desde, in: query, schema: { type: string, format: date } }
+        - { name: hasta, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: Gastos, el más reciente primero (máximo 500).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Gasto' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Ingresos y gastos]
+      summary: Registrar gasto (sale de un fondo)
+      operationId: createGasto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [concepto, amount_cents, spent_on]
+              properties:
+                fondo_id: { type: [string, 'null'], format: uuid, description: null = fondo de cuotas del agua. }
+                concepto: { type: string, minLength: 3, maxLength: 160, example: Cambio de bomba }
+                amount_cents: { type: integer, minimum: 1, example: 250000 }
+                spent_on: { type: string, format: date }
+                note: { type: [string, 'null'], maxLength: 255 }
+      responses:
+        '201':
+          description: Gasto registrado (avisa si el fondo queda en negativo).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /gastos/{id}/comprobante:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Ingresos y gastos]
+      summary: Subir comprobante (foto o PDF)
+      description: Se guarda en MinIO/S3 con su huella SHA-256.
+      operationId: uploadComprobante
+      parameters:
+        - { name: X-Device-Id, in: header, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [archivo]
+              properties:
+                archivo: { type: string, format: binary }
+      responses:
+        '200':
+          description: Comprobante guardado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Gasto' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [Ingresos y gastos]
+      summary: Descargar comprobante
+      operationId: downloadComprobante
+      responses:
+        '200':
+          description: Archivo (se envía por flujo, sin cargarlo completo en memoria).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cortes:
+    get:
+      tags: [Entregas y cortes]
+      summary: Lo que cada cobrador tiene por entregar
+      operationId: listCortes
+      responses:
+        '200':
+          description: Cortes (el cobrador solo ve el suyo).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Corte' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cortes/{cobradorId}:
+    get:
+      tags: [Entregas y cortes]
+      summary: Recibos por entregar de un cobrador
+      operationId: showCorte
+      parameters:
+        - { name: cobradorId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Recibos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        folio: { type: string }
+                        familia: { type: string }
+                        total_cents: { type: integer }
+                        paid_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /entregas:
+    get:
+      tags: [Entregas y cortes]
+      summary: Entregas registradas
+      operationId: listEntregas
+      responses:
+        '200':
+          description: Entregas (máximo 500).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entrega' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Entregas y cortes]
+      summary: Registrar que se recibió el dinero de unos recibos
+      description: Requiere `dinero.confirmar`. Los recibos se toman con `FOR UPDATE` para que no se entreguen dos veces.
+      operationId: createEntrega
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cobrador_id, pago_ids, received_cents]
+              properties:
+                cobrador_id: { type: string, format: uuid }
+                pago_ids: { type: array, items: { type: string, format: uuid } }
+                received_cents: { type: integer, minimum: 0 }
+                note: { type: [string, 'null'] }
+                received_at: { type: [string, 'null'], format: date-time }
+      responses:
+        '201':
+          description: Entrega registrada (avisa si falta o sobra dinero).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /roles:
+    get:
+      tags: [Usuarios]
+      summary: Roles asignables y su matriz de permisos
+      operationId: listRoles
+      responses:
+        '200':
+          description: Roles.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string, example: cobrador }
+                        permissions: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /users:
+    get:
+      tags: [Usuarios]
+      summary: Usuarios de la comunidad
+      operationId: listUsers
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: active, in: query, schema: { type: boolean } }
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Página de usuarios.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Usuarios]
+      summary: Crear usuario
+      description: La contraseña (mínimo 10 caracteres) se guarda con bcrypt; nunca se devuelve.
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserInput' }
+      responses:
+        '201':
+          description: Usuario creado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Usuarios]
+      summary: Detalle de usuario
+      operationId: showUser
+      responses:
+        '200':
+          description: Usuario.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Usuarios]
+      summary: Editar usuario
+      description: Si cambia la contraseña, se revocan todas sus sesiones JWT.
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserInput' }
+      responses:
+        '200':
+          description: Usuario actualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/{id}/activate:
+    post:
+      tags: [Usuarios]
+      summary: Activar usuario
+      operationId: activateUser
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Usuario activo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /users/{id}/deactivate:
+    post:
+      tags: [Usuarios]
+      summary: Desactivar usuario (revoca sus sesiones)
+      operationId: deactivateUser
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Usuario desactivado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithNotices' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/communities:
+    get:
+      tags: [Superadministrador]
+      summary: Comunidades
+      operationId: listCommunities
+      responses:
+        '200':
+          description: Comunidades.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Community' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Superadministrador]
+      summary: Alta de comunidad con su primer administrador
+      operationId: createCommunity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, state, municipality, locality, contact_phone, admin]
+              properties:
+                name: { type: string, maxLength: 160 }
+                state: { type: string }
+                municipality: { type: string }
+                locality: { type: string }
+                contact_phone: { type: string, pattern: '^\d{10}$' }
+                contact_email: { type: [string, 'null'], format: email }
+                admin: { $ref: '#/components/schemas/UserInput' }
+      responses:
+        '201':
+          description: Comunidad creada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/Community'
+                      - type: object
+                        properties:
+                          admin: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /autorizaciones:
+    get:
+      tags: [Gastos]
+      summary: Autorizaciones de gastos del cobrador (últimos 30 días), tope y cobradores
+      operationId: listAutorizaciones
+      responses:
+        '200': { description: '`{ tope_egreso_cents, cobradores[], autorizaciones[] }` (estado vigente, usada, vencida).' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Gastos]
+      summary: Generar un código para un gasto del cobrador que pasa el tope
+      description: |
+        Solo el administrador. Devuelve `codigo` (6 números) una sola vez: se dicta por teléfono o se manda por
+        WhatsApp al cobrador. Vence en 30 minutos (AUTORIZACION_MINUTES), sirve una vez, solo para ese cobrador
+        y hasta `max_amount_cents`.
+      operationId: createAutorizacion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cobrador_id, max_amount_cents]
+              properties:
+                cobrador_id: { type: string, format: uuid }
+                max_amount_cents: { type: integer, minimum: 1 }
+                motivo: { type: [string, 'null'], maxLength: 160 }
+      responses:
+        '201': { description: 'Autorización con su código.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /autorizaciones/canjear:
+    post:
+      tags: [Gastos]
+      summary: El cobrador canjea el código para un gasto que pasa el tope
+      description: |
+        Antes de guardar el gasto en el equipo (con internet). Queda ligado a `gasto_id`; el gasto se manda después
+        por /sync/push con `autorizacion_id`. Errores `autorizacion_invalida` (422), `autorizacion_monto` (422),
+        `autorizacion_vencida` (410) y, tras 5 intentos fallidos, `pin_locked` (423).
+      operationId: redeemAutorizacion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [codigo, gasto_id, amount_cents]
+              properties:
+                codigo: { type: string }
+                gasto_id: { type: string, format: uuid }
+                amount_cents: { type: integer, minimum: 1 }
+      responses:
+        '200': { description: 'Autorización usada (con quién la autorizó).' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '410': { description: 'Código vencido.' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423': { description: 'Demasiados códigos incorrectos.' }
+  /activation:
+    post:
+      tags: [Autenticación]
+      summary: Activar una cuenta dada de alta por correo (PIN + contraseña + foto)
+      description: |
+        Primer acceso. El PIN (6 números) vence en 24–48 h, sirve una vez y se anula tras 5 intentos.
+        Errores: `pin_invalid` (422, con `attempts_left`), `pin_expired` / `pin_used` (410), `pin_locked` (423),
+        `already_active` (409). La foto (JPG o PNG, máximo 5 MB) es obligatoria. También existe la página web `/activar`.
+      operationId: activateAccount
+      security: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [email, pin, password, password_confirmation, photo]
+              properties:
+                email: { type: string, format: email }
+                pin: { type: string, pattern: '^\d{6}$' }
+                password: { type: string, minLength: 10 }
+                password_confirmation: { type: string }
+                photo: { type: string, format: binary }
+      responses:
+        '200': { description: 'Cuenta activa; ya puede iniciar sesión.' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { description: 'PIN vencido o ya usado.' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423': { description: 'PIN anulado por intentos fallidos.' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /admin/communities/{id}/invitations:
+    post:
+      tags: [Superadministrador]
+      summary: Alta por correo de un administrador o cobrador
+      description: La cuenta queda pendiente y le llega un PIN para activarla. Si el correo ya estaba pendiente, se reenvía un PIN nuevo.
+      operationId: inviteCommunityUser
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, role]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                role: { type: string, enum: [administrador, cobrador] }
+      responses:
+        '201': { description: 'Persona dada de alta (pendiente) y correo enviado.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /admin/communities/{id}/users:
+    get:
+      tags: [Superadministrador]
+      summary: Personas de una comunidad (para elegir al nuevo administrador)
+      operationId: listCommunityUsers
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: 'Nombre, teléfono, correo, rol y si está activa cada persona.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/communities/{id}/admin:
+    post:
+      tags: [Superadministrador]
+      summary: Cambiar el administrador (pide el PIN de seguridad)
+      description: |
+        El administrador anterior deja de serlo: queda como cobrador desactivado (`previous: deactivate`,
+        por defecto) o como cobrador activo (`previous: cobrador`). Queda en la bitácora de la comunidad.
+        PIN incorrecto → 422 `pin_invalid` (con `attempts_left`); demasiados → 423 `pin_locked`;
+        sin PIN creado → 409 `pin_not_set`.
+      operationId: changeCommunityAdmin
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, pin]
+              properties:
+                user_id: { type: string, format: uuid }
+                pin: { type: string, pattern: '^\d{6}$' }
+                previous: { type: string, enum: [deactivate, cobrador] }
+      responses:
+        '200': { description: Administrador cambiado. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423': { description: PIN bloqueado por intentos fallidos. }
+  /admin/communities/{id}/deactivate:
+    post:
+      tags: [Superadministrador]
+      summary: Desactivar comunidad (nadie de ella entra ni sincroniza)
+      operationId: deactivateCommunity
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: 'Comunidad desactivada; sus sesiones abiertas se cierran.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/communities/{id}/activate:
+    post:
+      tags: [Superadministrador]
+      summary: Volver a activar una comunidad
+      operationId: activateCommunity
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: Comunidad activa. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/security-pin:
+    get:
+      tags: [Superadministrador]
+      summary: ¿Ya tiene PIN de seguridad?
+      operationId: securityPinStatus
+      responses:
+        '200': { description: '`{ is_set: bool }`' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Superadministrador]
+      summary: Crear o cambiar el PIN de seguridad (pide la contraseña)
+      operationId: setSecurityPin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, pin, pin_confirmation]
+              properties:
+                password: { type: string }
+                pin: { type: string, pattern: '^\d{6}$' }
+                pin_confirmation: { type: string }
+      responses:
+        '200': { description: 'PIN guardado (con hash).' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'JWT HS256 obtenido en `POST /auth/login`. Enviar `Authorization: Bearer <token>`.'
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PadronEntity:
+      name: entity
+      in: path
+      required: true
+      schema: { type: string, enum: [viviendas, familias, habitantes] }
+
+  responses:
+    Unauthorized:
+      description: Falta el JWT, es inválido, venció o la sesión se cerró.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: unauthenticated, message: Se requiere iniciar sesión. } }
+    Forbidden:
+      description: Sin permiso para la acción (o cuenta/comunidad desactivada).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: forbidden, message: No tiene permiso para esta acción. } }
+    NotFound:
+      description: No existe o es de otra comunidad.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: not_found, message: Recurso no encontrado. } }
+    Conflict:
+      description: Choca con el estado actual (ya pagado, ya anulado, domicilio con familia, etc.).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Datos inválidos; `details` trae los errores por campo.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: validation_error, message: 'Revisa los datos: hay campos con errores.', details: { email: [El campo correo es obligatorio.] } } }
+    TooManyRequests:
+      description: Límite de peticiones excedido.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: forbidden }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    Notice:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+    WithNotices:
+      type: object
+      properties:
+        data: { type: object, additionalProperties: true }
+        notices:
+          type: array
+          items: { $ref: '#/components/schemas/Notice' }
+    Paginated:
+      type: object
+      properties:
+        data: { type: array, items: {} }
+        meta:
+          type: object
+          properties:
+            page: { type: integer }
+            per_page: { type: integer }
+            total: { type: integer }
+            last_page: { type: integer }
+            message: { type: [string, 'null'] }
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        app: { type: string }
+        api_version: { type: string }
+        time: { type: string, format: date-time }
+        checks:
+          type: object
+          additionalProperties: { type: string, enum: [ok, fail] }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, maxLength: 190, example: admin@sanisidro.test }
+        password: { type: string, format: password, maxLength: 255 }
+        device_id: { type: [string, 'null'], format: uuid, description: Equipo de escritorio desde el que se entra. }
+        two_factor_code:
+          type: [string, 'null']
+          description: |
+            Código de 6 números que llegó al correo. Solo el administrador, y solo la primera vez que entra en un
+            equipo: sin él la respuesta es `403 two_factor_required` (con `email_hint`) y se envía el correo.
+    TokenResponse:
+      type: object
+      required: [token, token_type, expires_at, idle_timeout_minutes, user]
+      properties:
+        token: { type: string, description: JWT HS256 (header.payload.firma), example: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIuLi4ifQ.firma }
+        token_type: { type: string, const: Bearer }
+        expires_at: { type: string, format: date-time }
+        idle_timeout_minutes: { type: integer, example: 30 }
+        user: { $ref: '#/components/schemas/AuthUser' }
+    AuthUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        roles: { type: array, items: { type: string } }
+        panel: { type: [string, 'null'], enum: [superadministrador, administrador, cobrador, habitante, publico, null] }
+        community:
+          type: [object, 'null']
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        receipt_prefix: { type: string, example: E01 }
+        is_active: { type: boolean }
+        community_id: { type: string, format: uuid }
+    Mutation:
+      type: object
+      required: [mutation_id, entity, entity_id, op, payload]
+      properties:
+        mutation_id: { type: string, format: uuid, description: Llave de idempotencia. }
+        entity: { type: string, example: pagos }
+        entity_id: { type: string, format: uuid }
+        op: { type: string, enum: [create, update, delete, void] }
+        payload: { type: object, additionalProperties: true }
+        occurred_at: { type: [string, 'null'], format: date-time }
+    MutationResult:
+      type: object
+      properties:
+        mutation_id: { type: string, format: uuid }
+        status: { type: string, enum: [accepted, rejected] }
+        code: { type: string }
+        message: { type: string }
+        notices: { type: array, items: { $ref: '#/components/schemas/Notice' } }
+    Change:
+      type: object
+      properties:
+        cursor: { type: integer }
+        entity: { type: string }
+        entity_id: { type: string, format: uuid }
+        op: { type: string }
+        payload: { type: object, additionalProperties: true }
+        changed_at: { type: string, format: date-time }
+    AuditLog:
+      type: object
+      properties:
+        id: { type: integer }
+        created_at: { type: string, format: date-time }
+        action: { type: string, example: pago.created }
+        label: { type: string, example: Registró un cobro }
+        category: { type: string }
+        entity: { type: [string, 'null'] }
+        entity_id: { type: [string, 'null'] }
+        user_id: { type: [string, 'null'], format: uuid }
+        user_name: { type: [string, 'null'] }
+        device_id: { type: [string, 'null'], format: uuid }
+    ChainResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        checked: { type: integer }
+        broken_at: { type: [integer, 'null'] }
+    Base:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        is_active: { type: boolean }
+        deactivated_at: { type: [string, 'null'], format: date-time }
+        deactivation_reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Vivienda:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+          properties:
+            address: { type: string }
+            neighborhood: { type: [string, 'null'] }
+            reference: { type: [string, 'null'] }
+            paquete_id: { type: [string, 'null'] }
+            label: { type: string }
+            familias_activas: { type: integer }
+    Familia:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+          properties:
+            vivienda_id: { type: string, format: uuid }
+            name: { type: string }
+            head_id: { type: [string, 'null'], format: uuid }
+            cuota_especial_cents: { type: [integer, 'null'] }
+    Habitante:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+          properties:
+            familia_id: { type: string, format: uuid }
+            name: { type: string }
+            given_names: { type: string }
+            paternal_surname: { type: string }
+            maternal_surname: { type: [string, 'null'] }
+            phone: { type: [string, 'null'] }
+    ViviendaInput:
+      type: object
+      properties:
+        address: { type: string, maxLength: 190 }
+        neighborhood: { type: [string, 'null'], maxLength: 120 }
+        reference: { type: [string, 'null'], maxLength: 190 }
+        paquete_id: { type: [string, 'null'], example: p1 }
+    FamiliaInput:
+      type: object
+      properties:
+        vivienda_id: { type: string, format: uuid }
+        name: { type: string }
+        head_id: { type: [string, 'null'], format: uuid }
+        cuota_especial_cents: { type: [integer, 'null'] }
+    HabitanteInput:
+      type: object
+      properties:
+        familia_id: { type: string, format: uuid }
+        given_names: { type: string }
+        paternal_surname: { type: string }
+        maternal_surname: { type: [string, 'null'] }
+        phone: { type: [string, 'null'], pattern: '^\d{10}$' }
+    Paquete:
+      type: object
+      properties:
+        id: { type: string, example: p1 }
+        name: { type: string, example: Paquete 1 }
+        familias: { type: integer }
+        cuota_cents: { type: [integer, 'null'] }
+        activo: { type: boolean }
+    Ajustes:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        cuota_cents: { type: [integer, 'null'] }
+        periodicidad_meses: { type: integer }
+        dias_pago: { type: array, items: { type: integer } }
+        cobro_fuera_de_dias: { type: boolean }
+        multa_cents: { type: integer }
+        meses_adelanto: { type: integer }
+        paquetes: { type: array, items: { $ref: '#/components/schemas/Paquete' } }
+        cobradores: { type: array, items: { type: string } }
+        cuotas:
+          type: array
+          items:
+            type: object
+            properties:
+              valid_from: { type: string, format: date }
+              amount_cents: { type: integer }
+        multa_label: { type: [string, 'null'] }
+        updated_at: { type: string, format: date-time }
+    Cuota:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        amount_cents: { type: integer }
+        valid_from: { type: string, format: date }
+        note: { type: [string, 'null'] }
+        updated_at: { type: string, format: date-time }
+    CuotaInput:
+      type: object
+      required: [amount_cents, valid_from]
+      properties:
+        amount_cents: { type: integer, minimum: 1, example: 15000 }
+        valid_from: { type: string, format: date, example: '2026-11-01' }
+        note: { type: [string, 'null'], maxLength: 190 }
+    Periodo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        year: { type: integer }
+        month: { type: integer }
+        meses: { type: integer }
+        cuota_id: { type: [string, 'null'], format: uuid }
+        amount_cents: { type: integer }
+        label: { type: string }
+        cargos: { type: integer }
+        anulados: { type: integer }
+        total_cents: { type: integer }
+    Cargo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        periodo_id: { type: [string, 'null'], format: uuid }
+        familia_id: { type: string, format: uuid }
+        concept: { type: string, enum: [cuota, multa] }
+        description: { type: [string, 'null'] }
+        year: { type: integer }
+        month: { type: integer }
+        meses: { type: integer }
+        amount_cents: { type: integer }
+        voided_at: { type: [string, 'null'], format: date-time }
+        voided_by: { type: [string, 'null'], format: uuid }
+        void_reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+    CargoEstado:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        concept: { type: string }
+        label: { type: string, example: Cuota de noviembre 2026 }
+        description: { type: [string, 'null'] }
+        year: { type: integer }
+        month: { type: integer }
+        amount_cents: { type: integer }
+        status: { type: string, enum: [por_pagar, pagado, anulado] }
+        folio: { type: [string, 'null'] }
+    Pago:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        familia_id: { type: string, format: uuid }
+        vivienda_id: { type: string, format: uuid }
+        cobrador_id: { type: string, format: uuid }
+        cobrador_name: { type: [string, 'null'] }
+        folio: { type: string, example: W-000001 }
+        total_cents: { type: integer }
+        paid_at: { type: string, format: date-time }
+        cobradores: { type: [string, 'null'] }
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              cargo_id: { type: string, format: uuid }
+              amount_cents: { type: integer }
+        voided_at: { type: [string, 'null'], format: date-time }
+        voided_by: { type: [string, 'null'], format: uuid }
+        void_reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+    Asignacion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        cobrador_id: { type: string, format: uuid }
+        vivienda_id: { type: string, format: uuid }
+        starts_on: { type: string, format: date }
+        ends_on: { type: [string, 'null'], format: date }
+        updated_at: { type: string, format: date-time }
+        cobrador_name: { type: [string, 'null'] }
+        vivienda_label: { type: [string, 'null'] }
+    Categoria:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        is_active: { type: boolean }
+        saldo_cents: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Ingreso:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        categoria_id: { type: string, format: uuid }
+        categoria: { type: [string, 'null'] }
+        amount_cents: { type: integer }
+        received_on: { type: string, format: date }
+        note: { type: [string, 'null'] }
+        recorded_by: { type: string, format: uuid }
+        voided_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    Fondo:
+      type: object
+      properties:
+        id: { type: [string, 'null'], format: uuid, description: null = cuotas del agua. }
+        name: { type: string }
+        is_active: { type: boolean }
+        saldo_cents: { type: integer }
+    Gasto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fondo_id: { type: [string, 'null'], format: uuid }
+        fondo: { type: string }
+        concepto: { type: string }
+        amount_cents: { type: integer }
+        spent_on: { type: string, format: date }
+        note: { type: [string, 'null'] }
+        has_comprobante: { type: boolean }
+        comprobante_mime: { type: [string, 'null'] }
+        recorded_by: { type: string, format: uuid }
+        voided_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    Corte:
+      type: object
+      properties:
+        cobrador_id: { type: string, format: uuid }
+        cobrador: { type: [string, 'null'] }
+        recibos: { type: integer }
+        total_cents: { type: integer }
+        desde: { type: [string, 'null'], format: date-time }
+    Entrega:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        cobrador_id: { type: string, format: uuid }
+        received_by: { type: string, format: uuid }
+        pago_ids: { type: array, items: { type: string, format: uuid } }
+        expected_cents: { type: integer }
+        received_cents: { type: integer }
+        note: { type: [string, 'null'] }
+        received_at: { type: string, format: date-time }
+        voided_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        cobrador: { type: [string, 'null'] }
+        receptor: { type: [string, 'null'] }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        given_names: { type: string }
+        paternal_surname: { type: string }
+        maternal_surname: { type: [string, 'null'] }
+        phone: { type: string }
+        address: { type: string }
+        email: { type: string, format: email }
+        role: { type: [string, 'null'] }
+        is_active: { type: boolean }
+        last_login_at: { type: [string, 'null'], format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserInput:
+      type: object
+      properties:
+        given_names: { type: string, example: José }
+        paternal_surname: { type: string, example: Ramírez }
+        maternal_surname: { type: [string, 'null'] }
+        phone: { type: string, pattern: '^\d{10}$', example: '7221234567' }
+        address: { type: string, example: Calle Juárez 5 }
+        email: { type: string, format: email, example: jose@sanisidro.test }
+        role: { type: string, enum: [administrador, cobrador, habitante] }
+        password: { type: string, format: password, minLength: 10 }
+    Community:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        state: { type: string }
+        municipality: { type: string }
+        locality: { type: string }
+        zone: { type: [string, 'null'], description: Zona o colonia }
+        contact_phone: { type: string }
+        contact_email: { type: [string, 'null'] }
+        is_active: { type: boolean }
+        deactivated_at: { type: [string, 'null'], format: date-time }
+        users_count: { type: integer, description: Solo en la lista }
+        admin:
+          type: [object, 'null']
+          description: Administrador asignado (solo en la lista)
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            phone: { type: [string, 'null'] }
+            email: { type: string }
+        created_at: { type: string, format: date-time }

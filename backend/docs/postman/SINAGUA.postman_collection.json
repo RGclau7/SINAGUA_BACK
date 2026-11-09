@@ -1,0 +1,2521 @@
+{
+  "info": {
+    "_postman_id": "e93b4f8f-9894-5a39-abdd-bf71667b8976",
+    "name": "SINAGUA API v1",
+    "description": "Colección de la API de SINAGUA (gestión del pozo comunitario).\n\n**Cómo usarla:** importe esta colección y el entorno `SINAGUA-local`, levante el backend (`docker compose up -d`), cargue los datos de prueba (`php artisan db:seed --class=DemoSeeder`) y ejecute la colección completa con *Run collection* o con Newman:\n\n`npx newman run SINAGUA.postman_collection.json -e SINAGUA-local.postman_environment.json`\n\nEl administrador entra en dos pasos: contraseña y código de 6 números que llega a su correo (en pruebas se lee de Mailpit). El login guarda el JWT en la variable `token`; todas las peticiones lo envían como `Authorization: Bearer`. Cada petición trae pruebas automáticas (código HTTP, forma de la respuesta y casos de seguridad).\n\nContrato completo: OpenAPI 3.1 en `backend/docs/api/openapi.yaml` (Swagger UI en `/docs`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "admin_id",
+      "value": ""
+    },
+    {
+      "key": "token_alterado",
+      "value": ""
+    },
+    {
+      "key": "token_none",
+      "value": ""
+    },
+    {
+      "key": "token_viejo",
+      "value": ""
+    },
+    {
+      "key": "paquete_id",
+      "value": ""
+    },
+    {
+      "key": "vivienda_id",
+      "value": ""
+    },
+    {
+      "key": "familia_id",
+      "value": ""
+    },
+    {
+      "key": "habitante_id",
+      "value": ""
+    },
+    {
+      "key": "anio",
+      "value": ""
+    },
+    {
+      "key": "mes",
+      "value": ""
+    },
+    {
+      "key": "cargo_id",
+      "value": ""
+    },
+    {
+      "key": "pago_id",
+      "value": ""
+    },
+    {
+      "key": "pago_total",
+      "value": ""
+    },
+    {
+      "key": "categoria_id",
+      "value": ""
+    },
+    {
+      "key": "ingreso_id",
+      "value": ""
+    },
+    {
+      "key": "hoy",
+      "value": ""
+    },
+    {
+      "key": "gasto_id",
+      "value": ""
+    },
+    {
+      "key": "cobrador_id",
+      "value": ""
+    },
+    {
+      "key": "token_super",
+      "value": ""
+    },
+    {
+      "key": "codigo_login",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "00 · Sistema",
+      "description": "Estado del servicio (sin autenticación).",
+      "item": [
+        {
+          "name": "Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Base de datos ok', () => pm.expect(pm.response.json().data.checks.database).to.eql('ok'));",
+                  "pm.test('Cabeceras de seguridad', () => { pm.response.to.have.header('X-Content-Type-Options', 'nosniff'); pm.response.to.have.header('X-Frame-Options', 'DENY'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 · Autenticación (JWT)",
+      "description": "Login con bcrypt + JWT HS256, renovación y casos de rechazo.",
+      "item": [
+        {
+          "name": "Login administrador sin código (pide código por correo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403', () => pm.response.to.have.status(403));",
+                  "pm.test('Error two_factor_required', () => pm.expect(pm.response.json().error.code).to.eql('two_factor_required'));",
+                  "pm.test('Avisa a qué correo llegó (oculto)', () => pm.expect(pm.response.json().error.details.email_hint).to.include('•'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "La contraseña es correcta, pero el administrador entra desde un equipo nuevo: el servidor manda un código de 6 números a su correo y responde 403 `two_factor_required`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Leer el código del correo (Mailpit)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Hay un correo', () => pm.response.to.have.status(200));",
+                  "const m = (pm.response.json().Text || '').match(/\\b(\\d{6})\\b/);",
+                  "pm.test('El correo trae un código de 6 números', () => pm.expect(m).to.not.be.null);",
+                  "if (m) pm.collectionVariables.set('codigo_login', m[1]);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{mailpitUrl}}/api/v1/message/latest",
+              "host": [
+                "{{mailpitUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "message",
+                "latest"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "Mailpit es el buzón de pruebas que levanta docker compose (http://localhost:8025). Aquí se lee el último correo y se guarda el código en `codigo_login`. En la vida real el administrador lo copia de su correo."
+          }
+        },
+        {
+          "name": "Login administrador",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('token_type Bearer', () => pm.expect(d.token_type).to.eql('Bearer'));",
+                  "pm.test('El token es un JWT (3 partes)', () => pm.expect(d.token.split('.')).to.have.lengthOf(3));",
+                  "const header = JSON.parse(atob(d.token.split('.')[0].replace(/-/g,'+').replace(/_/g,'/')));",
+                  "const claims = JSON.parse(atob(d.token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                  "pm.test('Algoritmo HS256', () => pm.expect(header.alg).to.eql('HS256'));",
+                  "pm.test('Claims estándar (sub, jti, exp, aud)', () => { pm.expect(claims).to.include.keys('sub','jti','iat','exp','aud','iss'); pm.expect(claims.aud).to.eql('sinagua-api'); });",
+                  "pm.test('Vence en 12 horas', () => pm.expect(claims.exp - claims.iat).to.eql(43200));",
+                  "pm.collectionVariables.set('token', d.token);",
+                  "pm.collectionVariables.set('admin_id', d.user.id);",
+                  "pm.test('Responde en menos de 2 s', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Con el código del correo, devuelve un JWT firmado con HS256. El script lo guarda en la variable de colección `token` que usan las demás peticiones.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\",\n  \"two_factor_code\": \"{{codigo_login}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Login con contraseña incorrecta (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Error invalid_credentials', () => pm.expect(pm.response.json().error.code).to.eql('invalid_credentials'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Mismo mensaje para correo inexistente y contraseña incorrecta (no revela qué correos existen).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"no-es-la-clave\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Login sin datos (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error validation_error', () => pm.expect(pm.response.json().error.code).to.eql('validation_error'));",
+                  "pm.test('Detalle por campo', () => pm.expect(pm.response.json().error.details).to.include.keys('email','password'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Sin token (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Error unauthenticated', () => pm.expect(pm.response.json().error.code).to.eql('unauthenticated'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Token alterado (401)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Cambia el payload (sub) sin volver a firmar: la firma ya no coincide.",
+                  "const [h, p, s] = pm.collectionVariables.get('token').split('.');",
+                  "const claims = JSON.parse(atob(p.replace(/-/g,'+').replace(/_/g,'/')));",
+                  "claims.roles = ['superadministrador'];",
+                  "const p2 = btoa(JSON.stringify(claims)).replace(/=+$/,'').replace(/\\+/g,'-').replace(/\\//g,'_');",
+                  "pm.collectionVariables.set('token_alterado', [h, p2, s].join('.'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_alterado}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Token con alg none (401)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const p = pm.collectionVariables.get('token').split('.')[1];",
+                  "const h = btoa(JSON.stringify({typ:'JWT', alg:'none'})).replace(/=+$/,'');",
+                  "pm.collectionVariables.set('token_none', h + '.' + p + '.');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_none}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mi usuario",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Rol administrador', () => pm.expect(pm.response.json().data.roles).to.include('administrador'));",
+                  "pm.test('Responde en menos de 2 s', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Renovar token (rotación)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "const viejo = pm.collectionVariables.get('token');",
+                  "const nuevo = pm.response.json().data.token;",
+                  "pm.test('Token distinto', () => pm.expect(nuevo).to.not.eql(viejo));",
+                  "pm.collectionVariables.set('token_viejo', viejo);",
+                  "pm.collectionVariables.set('token', nuevo);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Entrega un JWT nuevo y revoca el anterior."
+          }
+        },
+        {
+          "name": "Token viejo ya no sirve (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_viejo}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 · Ajustes",
+      "description": "Cómo cobra la comunidad.",
+      "item": [
+        {
+          "name": "Ver ajustes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Trae paquetes', () => pm.expect(pm.response.json().data.paquetes).to.be.an('array').that.is.not.empty);",
+                  "pm.collectionVariables.set('paquete_id', pm.response.json().data.paquetes[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/ajustes",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ajustes"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 · Padrón",
+      "description": "Viviendas, familias y habitantes.",
+      "item": [
+        {
+          "name": "Registrar familia con titular",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "const d = pm.response.json().data;",
+                  "pm.collectionVariables.set('vivienda_id', d.vivienda.id);",
+                  "pm.collectionVariables.set('familia_id', d.familia.id);",
+                  "pm.collectionVariables.set('habitante_id', d.titular.id);",
+                  "pm.test('Responde en menos de 2 s', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/registro",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "registro"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vivienda\": {\n    \"address\": \"Calle Postman {{$randomInt}}-{{$timestamp}}\",\n    \"neighborhood\": \"Centro\",\n    \"paquete_id\": \"{{paquete_id}}\"\n  },\n  \"familia\": {\n    \"name\": \"Familia {{$randomLastName}}\"\n  },\n  \"titular\": {\n    \"given_names\": \"{{$randomFirstName}}\",\n    \"paternal_surname\": \"{{$randomLastName}}\",\n    \"phone\": \"7221234567\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Buscar viviendas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Paginado', () => pm.expect(pm.response.json().meta).to.include.keys('page','total','last_page'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/viviendas?search=Postman",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "viviendas"
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "Postman"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Detalle de la familia",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Trae habitantes', () => pm.expect(pm.response.json().data.habitantes).to.be.an('array'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/familias/{{familia_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "familias",
+                "{{familia_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Editar habitante",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Teléfono actualizado', () => pm.expect(pm.response.json().data.phone).to.eql('7229876543'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/habitantes/{{habitante_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "habitantes",
+                "{{habitante_id}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"7229876543\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Familia inexistente (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 404', () => pm.response.to.have.status(404));",
+                  "pm.test('Error not_found', () => pm.expect(pm.response.json().error.code).to.eql('not_found'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/familias/00000000-0000-4000-8000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "familias",
+                "00000000-0000-4000-8000-000000000000"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 · Cuotas y multas",
+      "description": "Cuota del mes, cargos y multas.",
+      "item": [
+        {
+          "name": "Historial de cuotas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cuotas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cuotas"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Generar cargos del mes actual",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = new Date(); pm.collectionVariables.set('anio', now.getFullYear()); pm.collectionVariables.set('mes', now.getMonth() + 1);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200/201', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/periodos/generar",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "periodos",
+                "generar"
+              ]
+            },
+            "description": "Idempotente: 201 si creó cargos, 200 si ya estaban.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"year\": \"{{anio}}\",\n  \"month\": \"{{mes}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Estado de cuenta de la familia",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "const cargos = pm.response.json().data.filter(c => !c.voided_at);",
+                  "pm.test('La familia tiene al menos un cargo', () => pm.expect(cargos.length).to.be.above(0));",
+                  "if (cargos.length) pm.collectionVariables.set('cargo_id', cargos[cargos.length - 1].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/familias/{{familia_id}}/cargos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "familias",
+                "{{familia_id}}",
+                "cargos"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Multas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/multas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "multas"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 · Cobranza (concurrencia)",
+      "description": "Cobro con folio. Cobrar dos veces el mismo mes devuelve 409.",
+      "item": [
+        {
+          "name": "Buscar domicilio",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cobranza/buscar?search=Postman",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cobranza",
+                "buscar"
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "Postman"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cuadrícula de la familia",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Mes por pagar', () => pm.expect(pm.response.json().data.map(c => c.status)).to.include('por_pagar'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cobranza/familias/{{familia_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cobranza",
+                "familias",
+                "{{familia_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cobrar el mes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('Folio W-######', () => pm.expect(d.folio).to.match(/^W-\\d{6}$/));",
+                  "pm.collectionVariables.set('pago_id', d.id); pm.collectionVariables.set('pago_total', d.total_cents);",
+                  "pm.test('Responde en menos de 2 s', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pagos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "pagos"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"familia_id\": \"{{familia_id}}\",\n  \"cargo_ids\": [\n    \"{{cargo_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Cobrar el mismo mes otra vez (409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409', () => pm.response.to.have.status(409));",
+                  "pm.test('Error already_paid', () => pm.expect(pm.response.json().error.code).to.eql('already_paid'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pagos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "pagos"
+              ]
+            },
+            "description": "Protección contra cobro doble: la transacción toma los cargos con SELECT … FOR UPDATE.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"familia_id\": \"{{familia_id}}\",\n  \"cargo_ids\": [\n    \"{{cargo_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Recibos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Aparece el recibo', () => pm.expect(pm.response.json().data.map(p => p.id)).to.include(pm.collectionVariables.get('pago_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pagos?familia_id={{familia_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "pagos"
+              ],
+              "query": [
+                {
+                  "key": "familia_id",
+                  "value": "{{familia_id}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 · Ingresos y gastos",
+      "description": "Fondos, ingresos extras y gastos.",
+      "item": [
+        {
+          "name": "Crear categoría de ingresos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.collectionVariables.set('categoria_id', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/ingresos/categorias",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingresos",
+                "categorias"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Faena {{$timestamp}}\",\n  \"description\": \"Creada desde Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Registrar ingreso",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('hoy', new Date().toISOString().slice(0, 10));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.collectionVariables.set('ingreso_id', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/ingresos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ingresos"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"categoria_id\": \"{{categoria_id}}\",\n  \"amount_cents\": 5000,\n  \"received_on\": \"{{hoy}}\",\n  \"note\": \"Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Fondos con saldo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Incluye el fondo de cuotas', () => pm.expect(pm.response.json().data[0].id).to.eql(null));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/fondos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "fondos"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Registrar gasto",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.collectionVariables.set('gasto_id', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/gastos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "gastos"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fondo_id\": \"{{categoria_id}}\",\n  \"concepto\": \"Material de limpieza\",\n  \"amount_cents\": 2000,\n  \"spent_on\": \"{{hoy}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Gastos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/gastos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "gastos"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 · Entregas y cortes",
+      "description": "El cobrador entrega el dinero a tesorería.",
+      "item": [
+        {
+          "name": "Cortes por entregar",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cortes",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cortes"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Registrar entrega del recibo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/entregas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "entregas"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cobrador_id\": \"{{admin_id}}\",\n  \"pago_ids\": [\n    \"{{pago_id}}\"\n  ],\n  \"received_cents\": \"{{pago_total}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Entregar el mismo recibo otra vez (409/422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409/422', () => pm.expect(pm.response.code).to.be.oneOf([409, 422]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/entregas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "entregas"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cobrador_id\": \"{{admin_id}}\",\n  \"pago_ids\": [\n    \"{{pago_id}}\"\n  ],\n  \"received_cents\": \"{{pago_total}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Entregas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/entregas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "entregas"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 · Movimientos",
+      "description": "Los movimientos de dinero no se borran: se anulan con motivo.",
+      "item": [
+        {
+          "name": "Anular ingreso sin motivo (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/movements/ingresos/{{ingreso_id}}/void",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "movements",
+                "ingresos",
+                "{{ingreso_id}}",
+                "void"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Anular ingreso con motivo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Queda anulado', () => pm.expect(pm.response.json().data.voided_at).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/movements/ingresos/{{ingreso_id}}/void",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "movements",
+                "ingresos",
+                "{{ingreso_id}}",
+                "void"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Se capturó dos veces\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 · Bitácora (cola asíncrona)",
+      "description": "Registro inmutable; verificación en la petición y en segundo plano.",
+      "item": [
+        {
+          "name": "Consultar bitácora",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/audit-logs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit-logs"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Verificar cadena de huellas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Cadena íntegra', () => pm.expect(pm.response.json().data.ok).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/audit-logs/verify",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit-logs",
+                "verify"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Pedir verificación en segundo plano (202)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 202', () => pm.response.to.have.status(202));",
+                  "pm.test('En cola', () => pm.expect(pm.response.json().data.status).to.eql('queued'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/audit-logs/verify-async",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit-logs",
+                "verify-async"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Pedirla otra vez (no duplica el trabajo) (202)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/audit-logs/verify-async",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit-logs",
+                "verify-async"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Estado de la verificación",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('queued o done', () => pm.expect(pm.response.json().data.status).to.be.oneOf(['queued','done']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/audit-logs/verify-async",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit-logs",
+                "verify-async"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "10 · Usuarios y cobradores",
+      "description": "Usuarios de la comunidad, roles y asignación de viviendas.",
+      "item": [
+        {
+          "name": "Roles y permisos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/roles",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "roles"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Crear cobrador",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));",
+                  "pm.test('Nunca devuelve la contraseña', () => pm.expect(pm.response.json().data).to.not.have.any.keys('password','password_hash'));",
+                  "pm.collectionVariables.set('cobrador_id', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"given_names\": \"{{$randomFirstName}}\",\n  \"paternal_surname\": \"{{$randomLastName}}\",\n  \"phone\": \"7221112233\",\n  \"address\": \"Calle Postman 1\",\n  \"email\": \"cobrador.{{$timestamp}}@postman.test\",\n  \"role\": \"cobrador\",\n  \"password\": \"clave-segura-123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Contraseña corta (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 422', () => pm.response.to.have.status(422));",
+                  "pm.test('Error validation_error', () => pm.expect(pm.response.json().error.code).to.eql('validation_error'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"given_names\": \"X\",\n  \"paternal_surname\": \"Y\",\n  \"phone\": \"7221112233\",\n  \"address\": \"Z\",\n  \"email\": \"corta.{{$timestamp}}@postman.test\",\n  \"role\": \"cobrador\",\n  \"password\": \"123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Asignar la vivienda al cobrador",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/asignaciones",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "asignaciones"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cobrador_id\": \"{{cobrador_id}}\",\n  \"vivienda_ids\": [\n    \"{{vivienda_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Cobradores",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cobradores",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cobradores"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Usuarios",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Desactivar cobrador (revoca sus sesiones)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Inactivo', () => pm.expect(pm.response.json().data.is_active).to.eql(false));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users/{{cobrador_id}}/deactivate",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users",
+                "{{cobrador_id}}",
+                "deactivate"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "11 · Superadministrador",
+      "description": "Solo da de alta comunidades; no ve sus movimientos.",
+      "item": [
+        {
+          "name": "Login superadministrador",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('token_super', pm.response.json().data.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{super_email}}\",\n  \"password\": \"{{super_password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Comunidades",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Respuesta con data', () => pm.expect(pm.response.json()).to.have.property('data'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/communities",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "communities"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_super}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Superadmin no ve padrón (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/padron/viviendas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "padron",
+                "viviendas"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_super}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Administrador no entra a /admin (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403', () => pm.response.to.have.status(403));",
+                  "pm.test('Error forbidden', () => pm.expect(pm.response.json().error.code).to.eql('forbidden'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/communities",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "communities"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "12 · Cerrar sesión",
+      "description": "Revoca el JWT al instante.",
+      "item": [
+        {
+          "name": "Cerrar sesión",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('logged_out', () => pm.expect(pm.response.json().data.logged_out).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Token tras cerrar sesión (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Error unauthenticated', () => pm.expect(pm.response.json().error.code).to.eql('unauthenticated'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

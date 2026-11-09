@@ -1,0 +1,49 @@
+# Prueba local de la imagen de producción (la misma que se sube a la nube).
+#   docker compose -f docker-compose.prod.yml up --build
+# Abre http://localhost:8095/api/v1/health  ·  correos en http://localhost:8096
+# Las claves de aquí son solo para esta prueba en tu computadora.
+name: sinagua-prod-local
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8095:8080"
+    environment:
+      APP_KEY: ${PROD_LOCAL_APP_KEY:?Defina PROD_LOCAL_APP_KEY (php artisan key:generate --show)}
+      APP_URL: http://localhost:8095
+      SINAGUA_PUBLIC_URL: http://localhost:8095
+      DB_CONNECTION: pgsql
+      DB_URL: postgresql://sinagua:solo-prueba-local@db:5432/sinagua
+      SESSION_DRIVER: database
+      CACHE_STORE: database
+      QUEUE_CONNECTION: sync
+      SINAGUA_FOTOS_DISK: local
+      SINAGUA_COMPROBANTES_DISK: local
+      MAIL_MAILER: smtp
+      MAIL_HOST: mail
+      MAIL_PORT: 1025
+      MAIL_FROM_ADDRESS: no-responder@sinagua.local
+      SINAGUA_SUPERADMIN_EMAIL: super@prueba.local
+      SINAGUA_SUPERADMIN_PASSWORD: clave-solo-prueba
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sinagua
+      POSTGRES_PASSWORD: solo-prueba-local
+      POSTGRES_DB: sinagua
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sinagua -d sinagua"]
+      interval: 5s
+      retries: 10
+
+  mail:
+    image: axllent/mailpit:latest
+    ports:
+      - "8096:8025"
